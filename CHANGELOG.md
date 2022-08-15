@@ -1,5 +1,10 @@
 # Change Log
 
+
+## 1.5.10 (2022-08-15)
+
+- [Issue #7](https://github.com/snipking/cordova-hot-code-push/issues/7). Fixed by change `pathToAndroidConfigXml()` implementation. Thank you, [guorenjie](https://github.com/guorenjie).
+
 ## 1.5.9 (2020-07-20)
 
 - Change `xcode` module require to support cordova 9
