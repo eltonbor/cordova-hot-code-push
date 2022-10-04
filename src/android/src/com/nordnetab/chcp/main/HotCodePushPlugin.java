@@ -4,6 +4,10 @@ import android.content.Context;
 import android.os.Handler;
 import android.text.TextUtils;
 import android.util.Log;
+import android.webkit.MimeTypeMap;
+import android.webkit.WebResourceResponse;
+
+import androidx.webkit.WebViewAssetLoader;
 
 import com.nordnetab.chcp.main.config.ApplicationConfig;
 import com.nordnetab.chcp.main.config.ChcpXmlConfig;
@@ -46,6 +50,7 @@ import org.apache.cordova.ConfigXmlParser;
 import org.apache.cordova.CordovaArgs;
 import org.apache.cordova.CordovaInterface;
 import org.apache.cordova.CordovaPlugin;
+import org.apache.cordova.CordovaPluginPathHandler;
 import org.apache.cordova.CordovaWebView;
 import org.apache.cordova.PluginResult;
 import org.greenrobot.eventbus.EventBus;
@@ -54,6 +59,9 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.InputStream;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -83,7 +91,6 @@ public class HotCodePushPlugin extends CordovaPlugin {
 
     private Handler handler;
     private boolean isPluginReadyForWork;
-    private boolean dontReloadOnStart;
 
     private List<PluginResult> defaultCallbackStoredResults;
     private FetchUpdateOptions defaultFetchUpdateOptions;
@@ -122,15 +129,8 @@ public class HotCodePushPlugin extends CordovaPlugin {
         isPluginReadyForWork = isPluginReadyForWork();
         Log.d("CHCP", "CHCP onStart is plugin ready for work: " + isPluginReadyForWork);
         if (!isPluginReadyForWork) {
-            dontReloadOnStart = true;
             installWwwFolder();
             return;
-        }
-
-        // reload only if we on local storage
-        if (!dontReloadOnStart) {
-            dontReloadOnStart = true;
-            redirectToLocalStorageIndexPage();
         }
 
         // install update if there is anything to install
@@ -296,7 +296,8 @@ public class HotCodePushPlugin extends CordovaPlugin {
 
     /**
      * Send message to default plugin callback.
-     * Default callback - is a callback that we receive on initialization (device ready).
+     * Default callback - is a callback that we receive on initialization (device
+     * ready).
      * Through it we are broadcasting different events.
      * <p/>
      * If callback is not set yet - message will be stored until it is initialized.
@@ -344,6 +345,7 @@ public class HotCodePushPlugin extends CordovaPlugin {
         // In some cases this is necessary, because on the launch we redirect user to the
         // external storage. And if he presses back button - browser will lead him back to
         // assets folder, which we don't want.
+        // TODO: check if this is still the case with the new engine
         handler.post(new Runnable() {
             @Override
             public void run() {
@@ -631,39 +633,6 @@ public class HotCodePushPlugin extends CordovaPlugin {
     }
 
     /**
-     * Redirect user onto the page, that resides on the external storage instead of the assets folder.
-     */
-    private void redirectToLocalStorageIndexPage() {
-        final String indexPage = getStartingPage();
-
-        // remove query and fragment parameters from the index page path
-        // TODO: cleanup this fragment
-        String strippedIndexPage = indexPage;
-        if (strippedIndexPage.contains("#") || strippedIndexPage.contains("?")) {
-            int idx = strippedIndexPage.lastIndexOf("?");
-            if (idx >= 0) {
-                strippedIndexPage = strippedIndexPage.substring(0, idx);
-            } else {
-                idx = strippedIndexPage.lastIndexOf("#");
-                strippedIndexPage = strippedIndexPage.substring(0, idx);
-            }
-        }
-
-        // make sure, that index page exists
-        String external = Paths.get(fileStructure.getWwwFolder(), strippedIndexPage);
-        if (!new File(external).exists()) {
-            Log.d("CHCP", "External starting page not found. Aborting page change.");
-            return;
-        }
-
-        // load index page from the external source
-        external = Paths.get(fileStructure.getWwwFolder(), indexPage);
-        webView.loadUrlIntoView(FILE_PREFIX + external, false);
-
-        Log.d("CHCP", "Loading external page: " + external);
-    }
-
-    /**
      * Getter for the startup page.
      *
      * @return startup page relative path
@@ -724,7 +693,8 @@ public class HotCodePushPlugin extends CordovaPlugin {
     }
 
     /**
-     * Listener for event that we failed to install assets folder on the external storage.
+     * Listener for event that we failed to install assets folder on the external
+     * storage.
      * If so - nothing we can do, plugin is not gonna work.
      *
      * @param event event details
@@ -893,7 +863,8 @@ public class HotCodePushPlugin extends CordovaPlugin {
         handler.post(new Runnable() {
             @Override
             public void run() {
-                HotCodePushPlugin.this.redirectToLocalStorageIndexPage();
+                webView.clearCache();
+                webView.sendJavascript("window.location.reload()");
             }
         });
 
@@ -1018,7 +989,7 @@ public class HotCodePushPlugin extends CordovaPlugin {
         );
     }
 
-    //endregion
+    // endregion
 
     // region Rollback process
 
@@ -1056,7 +1027,42 @@ public class HotCodePushPlugin extends CordovaPlugin {
         handler.post(new Runnable() {
             @Override
             public void run() {
-                redirectToLocalStorageIndexPage();
+                webView.clearCache();
+                webView.sendJavascript("window.location.reload()");
+            }
+        });
+    }
+
+    @Override
+    public CordovaPluginPathHandler getPathHandler() {
+        return new CordovaPluginPathHandler(new WebViewAssetLoader.PathHandler() {
+            @Override
+            public WebResourceResponse handle(String path) {
+                Log.d("CHCP", "Handle path" + path);
+                String external = Paths.get(fileStructure.getWwwFolder(), path);
+                Log.d("CHCP", "Handle external " + external);
+                InputStream is;
+                try {
+                    is = new FileInputStream(external);
+                } catch (IOException e) {
+                    Log.d("CHCP", "FileInputStream exception " + e);
+                    return null;
+                }
+                String mimeType = "text/html";
+                String extension = MimeTypeMap.getFileExtensionFromUrl(path);
+                if (extension != null) {
+                    if (path.endsWith(".js") || path.endsWith(".mjs")) {
+                        // Make sure JS files get the proper mimetype to support ES modules
+                        mimeType = "application/javascript";
+                    } else if (path.endsWith(".wasm")) {
+                        mimeType = "application/wasm";
+                    } else {
+                        mimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension);
+                    }
+                }
+                Map<String, String> headers = new HashMap<String, String>();
+                headers.put("CHCPv", pluginInternalPrefs.getCurrentReleaseVersionName());
+                return new WebResourceResponse(mimeType, null, 100, "OK", headers, is);
             }
         });
     }
